@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Corner &amp; Cut — Local Fighting Game</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0e0c12;
+    --panel: #17141d;
+    --border: #2a2532;
+    --text: #f1eef7;
+    --text-muted: #948da3;
+    --p1: #e6483c;
+    --p2: #3c8ee6;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2rem 1rem 3rem;
+  }
+
+  .marquee {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: clamp(2.2rem, 6vw, 3.6rem);
+    letter-spacing: 0.03em;
+    line-height: 1;
+    margin: 0 0 0.2rem;
+  }
+
+  .marquee span:first-child { color: var(--p1); }
+  .marquee span:last-child { color: var(--p2); }
+
+  .subtitle {
+    color: var(--text-muted);
+    margin: 0 0 1.6rem;
+    font-size: 0.95rem;
+  }
+
+  #arena-wrap {
+    width: 100%;
+    max-width: 800px;
+  }
+
+  canvas {
+    width: 100%;
+    display: block;
+    background: #0f151c;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+
+  .controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-top: 1.2rem;
+    max-width: 800px;
+    width: 100%;
+    font-size: 0.85rem;
+  }
+
+  .controls > div {
+    background: var(--panel);
+    padding: 0.9rem 1.1rem;
+  }
+
+  .controls h3 {
+    margin: 0 0 0.5rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+
+  .controls .p1 h3 { color: var(--p1); }
+  .controls .p2 h3 { color: var(--p2); }
+
+  .controls p {
+    margin: 0.2rem 0;
+    color: var(--text-muted);
+  }
+
+  .controls kbd {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 0.05rem 0.4rem;
+    color: var(--text);
+    font-family: inherit;
+  }
+</style>
+</head>
+<body>
+
+  <h1 class="marquee"><span>CORNER</span> &amp; <span>CUT</span></h1>
+  <p class="subtitle">Local 2-player fighting game — one keyboard, two fighters.</p>
+
+  <div id="arena-wrap">
+    <canvas id="gameCanvas" width="800" height="400"></canvas>
+  </div>
+
+  <div class="controls">
+    <div class="p1">
+      <h3>PLAYER 1 (RED)</h3>
+      <p><kbd>A</kbd> / <kbd>D</kbd> — move</p>
+      <p><kbd>W</kbd> — jump &nbsp; <kbd>S</kbd> — crouch</p>
+      <p><kbd>F</kbd> — punch &nbsp; <kbd>G</kbd> — kick</p>
+    </div>
+    <div class="p2">
+      <h3>PLAYER 2 (BLUE)</h3>
+      <p><kbd>&larr;</kbd> / <kbd>&rarr;</kbd> — move</p>
+      <p><kbd>&uarr;</kbd> — jump &nbsp; <kbd>&darr;</kbd> — crouch</p>
+      <p><kbd>K</kbd> — punch &nbsp; <kbd>L</kbd> — kick</p>
+    </div>
+  </div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+const CANVAS_W = canvas.width;
+const CANVAS_H = canvas.height;
+const GROUND_Y = 320;
+const GRAVITY = 0.85;
+
+// Frame data (at 60fps) — startup = wind-up before it can hit, active = the
+// window where it actually connects, recovery = locked out after, before you
+// can act again. This is the same structure real fighting games use, tuned
+// short here so the game feels fast.
+const ATTACK_DATA = {
+  punch: { startup: 3, active: 4, recovery: 5, damage: 8, reach: 34, armDrawReach: 28 },
+  kick:  { startup: 5, active: 5, recovery: 7, damage: 13, reach: 46, armDrawReach: 40 }
+};
+
+function rectsOverlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+let hitStopFrames = 0;
+let shakeMagnitude = 0;
+
+function triggerHitEffect() {
+  hitStopFrames = 4;
+  shakeMagnitude = 9;
+}
+
+class Fighter {
+  constructor(x, color, controls) {
+    this.x = x;
+    this.y = GROUND_Y;         // feet position
+    this.width = 50;
+    this.height = 100;
+    this.color = color;
+    this.facing = 1;
+    this.velX = 0;
+    this.velY = 0;
+    this.speed = 6.5;          // was 4 — noticeably faster movement
+    this.jumpPower = -15;
+    this.onGround = true;
+    this.health = 100;
+    this.controls = controls;
+    this.state = 'idle';       // idle | walk | crouch | punch | kick | hitstun
+    this.attackFrame = 0;
+    this.hitThisAttack = false;
+    this.hitstunTimer = 0;
+    this.walkCycle = 0;
+  }
+
+  get hurtbox() {
+    const h = this.state === 'crouch' ? this.height * 0.6 : this.height;
+    return { x: this.x, y: this.y - h, w: this.width, h };
+  }
+
+  get attackHitbox() {
+    const data = ATTACK_DATA[this.state];
+    const reach = data ? data.reach : 0;
+    const box = { y: this.y - this.height + (this.state === 'kick' ? 55 : 20), w: reach, h: 25 };
+    box.x = this.facing === 1 ? this.x + this.width : this.x - reach;
+    return box;
+  }
+
+  startAttack(type) {
+    this.state = type;
+    this.attackFrame = 0;
+    this.hitThisAttack = false;
+  }
+
+  takeHit(damage, fromFacing) {
+    this.health = Math.max(0, this.health - damage);
+    this.hitstunTimer = 10;    // was 14 — recovers faster, keeps pace up
+    this.velX = fromFacing * 7;
+    this.state = 'hitstun';
+  }
+
+  update(keys, opponent) {
+    if (this.hitstunTimer > 0) {
+      this.hitstunTimer--;
+      this.applyPhysics();
+      return;
+    }
+
+    const attacking = this.state === 'punch' || this.state === 'kick';
+
+    if (!attacking) {
+      this.facing = opponent.x > this.x ? 1 : -1;
+
+      this.velX = 0;
+      let moving = false;
+      if (keys[this.controls.left]) { this.velX = -this.speed; moving = true; }
+      if (keys[this.controls.right]) { this.velX = this.speed; moving = true; }
+
+      if (keys[this.controls.crouch] && this.onGround) {
+        this.state = 'crouch';
+        this.velX = 0;
+      } else if (moving && this.onGround) {
+        this.state = 'walk';
+        this.walkCycle++;
+      } else if (this.onGround) {
+        this.state = 'idle';
+      }
+
+      if (keys[this.controls.jump] && this.onGround) {
+        this.velY = this.jumpPower;
+        this.onGround = false;
+      }
+
+      if (keys[this.controls.punch]) this.startAttack('punch');
+      else if (keys[this.controls.kick]) this.startAttack('kick');
+    } else {
+      this.attackFrame++;
+      const data = ATTACK_DATA[this.state];
+      const total = data.startup + data.active + data.recovery;
+
+      // step into the attack while it's committed — adds a sense of weight
+      this.velX = this.attackFrame <= data.startup + data.active ? this.facing * 1.5 : 0;
+
+      if (!this.hitThisAttack && this.attackFrame > data.startup && this.attackFrame <= data.startup + data.active) {
+        if (rectsOverlap(this.attackHitbox, opponent.hurtbox)) {
+          opponent.takeHit(data.damage, this.facing);
+          this.hitThisAttack = true;
+          triggerHitEffect();
+        }
+      }
+
+      if (this.attackFrame >= total) this.state = 'idle';
+    }
+
+    this.applyPhysics();
+  }
+
+  applyPhysics() {
+    this.velY += GRAVITY;
+    this.x += this.velX;
+    this.y += this.velY;
+
+    if (this.y >= GROUND_Y) {
+      this.y = GROUND_Y;
+      this.velY = 0;
+      this.onGround = true;
+    } else {
+      this.onGround = false;
+    }
+
+    this.x = Math.max(0, Math.min(CANVAS_W - this.width, this.x));
+
+    if (this.hitstunTimer > 0) this.velX *= 0.85;
+  }
+
+  draw(ctx) {
+    const bodyH = this.state === 'crouch' ? this.height * 0.6 : this.height;
+    const cx = this.x + this.width / 2;
+    const feetY = this.y;
+    const headR = 9;
+    const legLen = 34;
+    const hipY = feetY - legLen;
+    const headCY = hipY - (bodyH - legLen) + headR;
+    const shoulderY = headCY + headR + 4;
+    const color = this.state === 'hitstun' ? '#ffffff' : this.color;
+
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.lineWidth = 7;
+    ctx.lineCap = 'round';
+
+    // Legs (swing while walking)
+    const swing = this.state === 'walk' ? Math.sin(this.walkCycle * 0.35) * 9 : 0;
+    ctx.beginPath();
+    ctx.moveTo(cx - 5, hipY);
+    ctx.lineTo(cx - 5 + swing, feetY);
+    ctx.moveTo(cx + 5, hipY);
+    ctx.lineTo(cx + 5 - swing, feetY);
+    ctx.stroke();
+
+    // Kicking leg extends toward the opponent
+    if (this.state === 'kick') {
+      const data = ATTACK_DATA.kick;
+      const progress = Math.min(1, this.attackFrame / (data.startup + data.active));
+      const kickReach = this.facing * progress * data.armDrawReach;
+      ctx.beginPath();
+      ctx.moveTo(cx, hipY + 10);
+      ctx.lineTo(cx + kickReach, hipY + 10 - progress * 14);
+      ctx.stroke();
+    }
+
+    // Torso
+    ctx.beginPath();
+    ctx.moveTo(cx, shoulderY);
+    ctx.lineTo(cx, hipY);
+    ctx.stroke();
+
+    // Back arm (stays tucked)
+    ctx.beginPath();
+    ctx.moveTo(cx, shoulderY + 4);
+    ctx.lineTo(cx - this.facing * 12, shoulderY + 16);
+    ctx.stroke();
+
+    // Front arm — extends on punch
+    let armReach = 14;
+    let armDrop = 16;
+    if (this.state === 'punch') {
+      const data = ATTACK_DATA.punch;
+      const progress = Math.min(1, this.attackFrame / (data.startup + data.active));
+      armReach = 14 + progress * data.armDrawReach;
+      armDrop = 4;
+    }
+    ctx.beginPath();
+    ctx.moveTo(cx, shoulderY + 4);
+    ctx.lineTo(cx + this.facing * armReach, shoulderY + armDrop);
+    ctx.stroke();
+
+    // Head + facing dot
+    ctx.beginPath();
+    ctx.arc(cx, headCY, headR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#0e0c12';
+    ctx.beginPath();
+    ctx.arc(cx + this.facing * 4, headCY, 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Active-frame hitbox flash (only while it can actually land)
+    if (this.state === 'punch' || this.state === 'kick') {
+      const data = ATTACK_DATA[this.state];
+      if (this.attackFrame > data.startup && this.attackFrame <= data.startup + data.active) {
+        const box = this.attackHitbox;
+        ctx.fillStyle = 'rgba(255, 214, 0, 0.55)';
+        ctx.fillRect(box.x, box.y, box.w, box.h);
+      }
+    }
+  }
+}
+
+const p1Controls = { left: 'a', right: 'd', jump: 'w', crouch: 's', punch: 'f', kick: 'g' };
+const p2Controls = { left: 'arrowleft', right: 'arrowright', jump: 'arrowup', crouch: 'arrowdown', punch: 'k', kick: 'l' };
+
+const keys = {};
+window.addEventListener('keydown', (e) => {
+  keys[e.key.toLowerCase()] = true;
+  if (gameOver && e.key.toLowerCase() === 'r') resetGame();
+});
+window.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
+
+let player1, player2, timeLeft, frameCount, gameOver, winnerText;
+
+function resetGame() {
+  player1 = new Fighter(150, getComputedColor('--p1'), p1Controls);
+  player2 = new Fighter(600, getComputedColor('--p2'), p2Controls);
+  timeLeft = 60;
+  frameCount = 0;
+  gameOver = false;
+  winnerText = '';
+  hitStopFrames = 0;
+  shakeMagnitude = 0;
+}
+
+function getComputedColor(varName) {
+  return getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+}
+
+function drawHealthBar(x, y, health, color, flipFill) {
+  const w = 220, h = 18;
+  ctx.fillStyle = '#2a2532';
+  ctx.fillRect(x, y, w, h);
+  const pct = Math.max(0, health) / 100;
+  ctx.fillStyle = color;
+  if (flipFill) ctx.fillRect(x + w - w * pct, y, w * pct, h);
+  else ctx.fillRect(x, y, w * pct, h);
+  ctx.strokeStyle = '#f1eef7';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+}
+
+function drawUI() {
+  drawHealthBar(20, 18, player1.health, getComputedColor('--p1'), false);
+  drawHealthBar(CANVAS_W - 240, 18, player2.health, getComputedColor('--p2'), true);
+
+  ctx.fillStyle = '#f1eef7';
+  ctx.font = '22px Inter, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(timeLeft, CANVAS_W / 2, 34);
+}
+
+function gameLoop() {
+  requestAnimationFrame(gameLoop);
+
+  ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+
+  if (!gameOver) {
+    if (hitStopFrames > 0) {
+      hitStopFrames--;
+    } else {
+      player1.update(keys, player2);
+      player2.update(keys, player1);
+    }
+
+    frameCount++;
+    if (frameCount % 60 === 0) timeLeft--;
+
+    if (player1.health <= 0 || player2.health <= 0 || timeLeft <= 0) {
+      gameOver = true;
+      winnerText = player1.health === player2.health
+        ? 'Draw!'
+        : (player1.health > player2.health ? 'Player 1 wins!' : 'Player 2 wins!');
+    }
+  }
+
+  ctx.save();
+  if (shakeMagnitude > 0.3) {
+    ctx.translate((Math.random() - 0.5) * shakeMagnitude, (Math.random() - 0.5) * shakeMagnitude);
+    shakeMagnitude *= 0.8;
+  } else {
+    shakeMagnitude = 0;
+  }
+
+  ctx.fillStyle = '#0f151c';
+  ctx.fillRect(-20, -20, CANVAS_W + 40, CANVAS_H + 40);
+  ctx.fillStyle = '#171225';
+  ctx.fillRect(0, GROUND_Y, CANVAS_W, CANVAS_H - GROUND_Y);
+
+  player1.draw(ctx);
+  player2.draw(ctx);
+  ctx.restore();
+
+  drawUI();
+
+  if (gameOver) {
+    ctx.fillStyle = 'rgba(14, 12, 18, 0.72)';
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+    ctx.fillStyle = '#f1eef7';
+    ctx.textAlign = 'center';
+    ctx.font = '38px Bebas Neue, sans-serif';
+    ctx.fillText(winnerText, CANVAS_W / 2, CANVAS_H / 2 - 6);
+    ctx.font = '16px Inter, sans-serif';
+    ctx.fillStyle = '#948da3';
+    ctx.fillText('Press R to rematch', CANVAS_W / 2, CANVAS_H / 2 + 26);
+  }
+}
+
+resetGame();
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
